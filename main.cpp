@@ -72,7 +72,7 @@ struct Sim
         : width(w), height(h), cells(width*height, { 1.0f, 0.0f })
     {
         // seed a little B
-        uint32_t seedSize = 100;
+        uint32_t seedSize = 100;//uint32_t(width);
         for (uint32_t y = 0; y < seedSize; ++y)
         {
             for (uint32_t x = 0; x < seedSize; ++x)
@@ -80,7 +80,8 @@ struct Sim
                 if (x*x + y*y > seedSize* seedSize)
                     continue;
 
-                cells[x + y*width].b = 1.0f;
+                cells[x + y * width].a = 0.0f;
+                cells[x + y * width].b = 1.0f;
             }
         }
 
@@ -290,10 +291,17 @@ void Sim::tickSubset(uint32_t startY, uint32_t endY, float deltaTime)
     const ptrdiff_t dl = width - 1;
     const ptrdiff_t dn = width;
     const ptrdiff_t dr = 1 + width;
+
+    float recipWidth = 1.0f / float(width);
+    float recipHeight = 1.0f / float(height);
+
     for (size_t y = startY; y < endY; ++y)
     {
-        size_t py = (y > 0) ? (y - 1) : (height - 1);
-        size_t ny = (y + 1 < height) ? (y + 1) : 0;
+        size_t py = (y > 0) ? (y - 1) : y;
+        size_t ny = (y + 1 < height) ? (y + 1) : y;
+
+        float feed = 0.1f - 0.09f * float(y) * recipHeight;
+       // feed = feedRate;
 
         for (size_t x = 0; x < width; ++x, ++out, ++in)
         {
@@ -308,17 +316,20 @@ void Sim::tickSubset(uint32_t startY, uint32_t endY, float deltaTime)
             }
             else
             {
-                size_t px = (x > 0) ? (x - 1) : (width - 1);
-                size_t nx = (x + 1 < width) ? (x + 1) : 0;
+                size_t px = (x > 0) ? (x - 1) : x;
+                size_t nx = (x + 1 < width) ? (x + 1) : x;
 
                 laplacian =  0.2f * (cells[py * width + x] + cells[y * width + px] + cells[y * width + nx] + cells[ny * width + x]);
                 laplacian += 0.05f * (cells[py * width + px] + cells[py * width + nx] + cells[ny * width + px] + cells[ny * width + nx]);
                 laplacian -= *in;
             }
 
+            float kill = 0.045f + 0.025f * float(x) * recipWidth;
+          //  kill = killRate;
+
             float ab2 = in->a * in->b * in->b;
-            out->a = in->a + (diffusionA * laplacian.a - ab2 + feedRate * (1.0f - in->a));// * deltaTime;
-            out->b = in->b + (diffusionB * laplacian.b + ab2 - (killRate + feedRate) * in->b);// * deltaTime;
+            out->a = in->a + (diffusionA * laplacian.a - ab2 + feed * (1.0f - in->a));// * deltaTime;
+            out->b = in->b + (diffusionB * laplacian.b + ab2 - (kill + feed) * in->b);// * deltaTime;
         }
     }
 }
@@ -337,11 +348,21 @@ void Sim::tick(float deltatime)
     const size_t ur = 1 - width;
     const size_t lf = -1;
     const size_t rt = 1;
-    const size_t dl = 1 + width;
+    const size_t dl = width - 1;
     const size_t dn = width;
     const size_t dr = 1 + width;
+
+    float recipWidth = 1.0f / float(width);
+    float recipHeight = 1.0f / float(height);
+
     for (size_t y = 0; y < height; ++y)
     {
+        float feed = 0.01f + 0.09f * float(y) * recipHeight;
+        _ASSERT(feed >= 0.0096 && feed <= 0.102);
+        _ASSERT(isfinite(feed));
+
+        feed = feedRate;
+
         for (size_t x = 0; x < width; ++x, ++out, ++in)
         {
             // laplacian based on https://www.karlsims.com/rd.html
@@ -364,13 +385,28 @@ void Sim::tick(float deltatime)
                 laplacian += 0.05f * (cells[py * width + px] + cells[py * width + nx] + cells[ny * width + px] + cells[ny * width + nx]);
             }
 
+            float kill = 0.045f + 0.025f * float(x) * recipWidth;
+            _ASSERT(kill >= 0.043 && kill <= 0.072);
+            _ASSERT(isfinite(kill));
+            kill = killRate;
+
             float ab2 = in->a * in->b * in->b;
-            out->a = in->a + (diffusionA * laplacian.a - ab2 + feedRate * (1.0f - in->a)) * deltatime;
-            out->b = in->b + (diffusionB * laplacian.b + ab2 - (killRate + feedRate) * in->b) * deltatime;
+            _ASSERT(isfinite(ab2));
+            out->a = in->a + (diffusionA * laplacian.a - ab2 + feed * (1.0f - in->a));// * deltatime;
+            _ASSERT(out->a >= 0.0f);
+            _ASSERT(out->a <= 1.0f);
+            _ASSERT(isfinite(out->a));
+            _ASSERT(fabsf(out->a) < 100.0f);
+            out->b = in->b + (diffusionB * laplacian.b + ab2 - (kill + feed) * in->b);// * deltatime;
+            _ASSERT(out->b >= 0.0f);
+            _ASSERT(out->b <= 1.0f);
+            _ASSERT(isfinite(out->b));
+            _ASSERT(fabsf(out->b) < 100.0f);
         }
     }
 
     cells.swap(next);
+    std::ranges::copy(cells, begin(published));
 #else
     // this all happens inside simThreadFunc
 #endif
@@ -381,7 +417,9 @@ __declspec(noinline) void Sim::render(uint32_t* pixels, size_t w, size_t h) cons
     _ASSERT(w == width && h == height);
     _ASSERT(pixels);
 
+#ifdef D_USE_WORKERS
     ScopeCs cs(publishCs);
+#endif
 
     const Cell* cell = published.data();
     uint32_t* pixel = pixels;
@@ -417,8 +455,8 @@ __declspec(noinline) void Sim::render(uint32_t* pixels, size_t w, size_t h) cons
 
 int main()
 {
-    int width = 600;
-    int height = 600;
+    int width = 900;
+    int height = 900;
 
     Pixie::Window win;
     const bool fullscreen = false;
