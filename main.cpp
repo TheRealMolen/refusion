@@ -4,6 +4,7 @@
 #include <format>
 #include <iostream>
 #include <mutex>
+#include <numbers>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -36,10 +37,20 @@ struct Sim
         {
             return { a + o.a, b + o.b };
         }
+        Cell operator-(const Cell& o) const
+        {
+            return { a - o.a, b - o.b };
+        }
         Cell& operator+=(const Cell& o)
         {
             a += o.a;
             b += o.b;
+            return *this;
+        }
+        Cell& operator-=(const Cell& o)
+        {
+            a -= o.a;
+            b -= o.b;
             return *this;
         }
     };
@@ -52,8 +63,9 @@ struct Sim
     // sim params
     float diffusionA = 1.0f;
     float diffusionB = 0.5f;
-    float feedRate = 0.056f;//0.055f;
-    float killRate = 0.064f;//0.062f;
+    float feedRate = 0.055f;//0.055f;
+    float killRate = 0.062f;//0.062f;
+    float feedKillAngle = 0.0f;
 
     
     Sim(size_t w, size_t h)
@@ -88,23 +100,13 @@ struct Sim
     void render(uint32_t* pixels, size_t w, size_t h) const;
 
 
-    // ----- workers ------
 #ifdef D_USE_WORKERS
     static const int WorkerPoolSize = 10;
-    //struct WorkerCommand
-    //{
-    //    uint32_t startY = ~0u;       // if ==~0u means "quit"
-    //    uint32_t endY;
-    //    float    deltatime;
-    //};
 
     unique_ptr<std::thread> simThread;
-    //std::mutex workQueueCs;
     mutable std::mutex publishCs;
     vector<std::thread> workers;
-    //vector<WorkerCommand> commands;
     std::atomic_bool shouldQuit{ false };
-    //std::atomic<int64_t> incompleteCommands;
     struct alignas(64) WorkerCommand
     {
         std::atomic_uint64_t val{0};
@@ -169,14 +171,6 @@ void Sim::initWorkers()
 void Sim::teardownWorkers()
 {
 #ifdef D_USE_WORKERS
-    /*{
-        std::lock_guard<std::mutex> lock(workQueueCs);
-        for (auto& worker : workers)
-            commands.emplace_back();
-        incompleteCommands += int64_t(workers.size());
-    }*/
-    //shouldQuit = true;
-
     shouldQuit = true;
     if (simThread.get())
         simThread->join();
@@ -203,6 +197,11 @@ void Sim::teardownWorkers()
 #ifdef D_USE_WORKERS
 void Sim::simThreadFunc()
 {
+    const float twoPi = std::numbers::pi_v<float> * 2.0f;
+
+    auto start = std::chrono::high_resolution_clock::now();
+    double secsSinceLastWrap = 0.0;
+
     while (!shouldQuit)
     {
         _ASSERT(!std::any_of(begin(workerBusy), end(workerBusy), [](const auto& command) { return command.val.load() > 0; }));
@@ -222,15 +221,31 @@ void Sim::simThreadFunc()
 
         cells.swap(next);
 
+        if (publishCs.try_lock())
         {
-            if (!publishCs.try_lock())
-                continue;
-
-            //std::ranges::copy(cells, begin(published));
             published.swap(next);
-
             publishCs.unlock();
         }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> dur = end - start;
+        start = end;
+        secsSinceLastWrap += dur.count();
+
+        static const double wrapTimeSecs = 10.0;
+        feedKillAngle += float((dur.count() * twoPi / wrapTimeSecs));
+        if (feedKillAngle > twoPi)
+        {
+            feedKillAngle -= twoPi;
+            secsSinceLastWrap = 0.0;
+        }
+
+        static constexpr float feedOrg = 0.032f;
+        static constexpr float feedScl = 0.002f;
+        static constexpr float killOrg = 0.060f;
+        static constexpr float killScl = 0.002f;
+        feedRate = cosf(feedKillAngle) * feedScl + feedOrg;
+        killRate = sinf(feedKillAngle) * killScl + killOrg;
     }
 }
 
@@ -238,41 +253,17 @@ void Sim::workerFunc(int ix, uint32_t startY, uint32_t endY, float deltaTime)
 {
     for (;;)
     {
-        //if (shouldQuit.load())
-        //    return;
-
-        /*
-        if (incompleteCommands.load() == 0)
-        {
-            std::this_thread::yield();
-            continue;
-        }*/
         workerBusy[ix].val.wait(0);
         uint64_t command = workerBusy[ix].val.load();
         if (command == 0)
-        {
-            //std::this_thread::yield();
             continue;
-        }
         if (command > 1)
             return;
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        /*
-        WorkerCommand command;
-        {
-            std::lock_guard<std::mutex> lock(workQueueCs);
-            if (commands.empty())
-                continue;
-
-            command = commands.back();
-            commands.pop_back();
-        }*/
-
         tickSubset(startY, endY, deltaTime);
 
-        //--incompleteCommands;
         if (!workerBusy[ix].val.compare_exchange_strong(command, 0))
             break;
 
@@ -291,41 +282,43 @@ void Sim::tickSubset(uint32_t startY, uint32_t endY, float deltaTime)
     auto out = next.data() + (width * startY);
     auto in = cells.data() + (width * startY);
 
-    const size_t ul = -1 - width;
-    const size_t up = 0 - width;
-    const size_t ur = 1 - width;
-    const size_t lf = -1;
-    const size_t rt = 1;
-    const size_t dl = 1 + width;
-    const size_t dn = width;
-    const size_t dr = 1 + width;
+    const ptrdiff_t ul = -1 - width;
+    const ptrdiff_t up = 0 - width;
+    const ptrdiff_t ur = 1 - width;
+    const ptrdiff_t lf = -1;
+    const ptrdiff_t rt = 1;
+    const ptrdiff_t dl = width - 1;
+    const ptrdiff_t dn = width;
+    const ptrdiff_t dr = 1 + width;
     for (size_t y = startY; y < endY; ++y)
     {
+        size_t py = (y > 0) ? (y - 1) : (height - 1);
+        size_t ny = (y + 1 < height) ? (y + 1) : 0;
+
         for (size_t x = 0; x < width; ++x, ++out, ++in)
         {
             // laplacian based on https://www.karlsims.com/rd.html
             Cell laplacian;
             if (x > 0 && y > 0 && x + 1 < width && y + 1 < height)
             {
-                laplacian = -1.0f * *in +
+                laplacian =
                     0.2f * (*(in + up) + *(in + lf) + *(in + rt) + *(in + dn)) +
-                    0.05f * (*(in + ul) + *(in + ur) + *(in + dl) + *(in + dr));
+                    + 0.05f * (*(in + ul) + *(in + ur) + *(in + dl) + *(in + dr))
+                    - *in;
             }
             else
             {
                 size_t px = (x > 0) ? (x - 1) : (width - 1);
                 size_t nx = (x + 1 < width) ? (x + 1) : 0;
-                size_t py = (y > 0) ? (y - 1) : (height - 1);
-                size_t ny = (y + 1 < height) ? (y + 1) : 0;
 
-                laplacian = -1.0f * *in;
-                laplacian += 0.2f * (cells[py * width + x] + cells[y * width + px] + cells[y * width + nx] + cells[ny * width + x]);
+                laplacian =  0.2f * (cells[py * width + x] + cells[y * width + px] + cells[y * width + nx] + cells[ny * width + x]);
                 laplacian += 0.05f * (cells[py * width + px] + cells[py * width + nx] + cells[ny * width + px] + cells[ny * width + nx]);
+                laplacian -= *in;
             }
 
             float ab2 = in->a * in->b * in->b;
-            out->a = in->a + (diffusionA * laplacian.a - ab2 + feedRate * (1.0f - in->a)) * deltaTime;
-            out->b = in->b + (diffusionB * laplacian.b + ab2 - (killRate + feedRate) * in->b) * deltaTime;
+            out->a = in->a + (diffusionA * laplacian.a - ab2 + feedRate * (1.0f - in->a));// * deltaTime;
+            out->b = in->b + (diffusionB * laplacian.b + ab2 - (killRate + feedRate) * in->b);// * deltaTime;
         }
     }
 }
@@ -379,27 +372,7 @@ void Sim::tick(float deltatime)
 
     cells.swap(next);
 #else
-    //_ASSERT(incompleteCommands == 0);
-    //uint32_t rowsPerWorker = uint32_t(height / WorkerPoolSize);
-    {
-        /*
-        std::lock_guard<std::mutex> cs(workQueueCs);
-        uint32_t startY = 0;
-        uint32_t endY = startY + rowsPerWorker;
-        for (int i = 0; i<WorkerPoolSize; ++i)
-        {
-            if (i+1 == WorkerPoolSize)
-                endY = uint32_t(height);
-
-            commands.emplace_back(startY, endY, deltatime);
-
-            startY = endY;
-            endY += rowsPerWorker;
-        }
-        */
-
-        //incompleteCommands += WorkerPoolSize;
-    }
+    // this all happens inside simThreadFunc
 #endif
 }
 
@@ -415,18 +388,26 @@ __declspec(noinline) void Sim::render(uint32_t* pixels, size_t w, size_t h) cons
     for ( ; pixel != pixels + (width * height); ++pixel, ++cell)
     {
         uint32_t col = 0xff88ff;
-        if (cell->b > 0.001f)
-        {
-            float concA = cell->a / (cell->a + cell->b);
-            concA *= concA;
-            concA *= concA;
-            int i = clamp(int(concA * 255.0f), 0, 0xff);
-            col = uint32_t((i<<16) | (i<<8) | i);
-        }
-        else if (cell->a > 0.0f)
-        {
-            col = 0xffffff;
-        }
+        //if (cell->b > 0.0f)
+        //{
+        //    //col = 0;
+
+        //    float concA = cell->a / (cell->a + cell->b);
+        //    concA *= concA;
+        //    concA *= concA;
+        //    int i = clamp(int(concA * 255.0f), 0, 0xff);
+        //    col = uint32_t((i<<16) | (i<<8) | i);
+        //}
+        //else if (cell->a > 0.01f)
+        //{
+        //    col = 0xffffff;
+        //}
+
+        float bias = cell->a - cell->b;
+        bias -= 0.2f;
+        bias *= 10.0f;
+        int i = clamp(int(bias * 255.0f), 0, 0xff);
+        col = uint32_t((i<<16) | (i<<8) | i);
 
         *pixel = col;
     }
@@ -436,8 +417,8 @@ __declspec(noinline) void Sim::render(uint32_t* pixels, size_t w, size_t h) cons
 
 int main()
 {
-    int width = 400;
-    int height = 400;
+    int width = 600;
+    int height = 600;
 
     Pixie::Window win;
     const bool fullscreen = false;
