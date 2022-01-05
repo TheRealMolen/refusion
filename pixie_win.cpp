@@ -75,7 +75,7 @@ bool Window::PlatformOpen(const char* title, int width, int height)
     }
     else
     {
-        style = WS_BORDER | WS_CAPTION | WS_SYSMENU;
+        style = WS_BORDER | WS_SYSMENU | WS_CAPTION;
 
         RECT rect;
         rect.left = 0;
@@ -94,7 +94,7 @@ bool Window::PlatformOpen(const char* title, int width, int height)
     m_windowWidth = width;
     m_windowHeight = height;
 
-    HWND window = CreateWindow(PixieWindowClass, title, style, xPos, yPos, width, height, NULL, NULL, hInstance, NULL);
+    HWND window = CreateWindowEx(WS_EX_DLGMODALFRAME, PixieWindowClass, title, style, xPos, yPos, width, height, NULL, NULL, hInstance, NULL);
     m_window = (HWND)window;
     if (window == 0)
         return false;

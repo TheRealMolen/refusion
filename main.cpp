@@ -18,7 +18,6 @@
 
 #define D_USE_WORKERS
 
-using namespace std::chrono_literals;
 using std::unique_ptr;
 using std::vector;
 using ScopeCs = std::lock_guard<std::mutex>;
@@ -61,8 +60,8 @@ struct Sim
     vector<Cell> published;
 
     // sim params
-    float diffusionA = 1.0f;
-    float diffusionB = 0.5f;
+    float diffusionA = 0.6f;
+    float diffusionB = 0.2f;
     float feedRate = 0.055f;//0.055f;
     float killRate = 0.062f;//0.062f;
     float feedKillAngle = 0.0f;
@@ -116,8 +115,8 @@ struct Sim
     };
     WorkerCommand workerBusy[WorkerPoolSize];
 
-    void workerFunc(int ix, uint32_t startY, uint32_t endY, float deltaTime);
-    void tickSubset(uint32_t startY, uint32_t endY, float deltaTime);
+    void workerFunc(int ix, uint32_t startY, uint32_t endY);
+    void tickSubset(uint32_t startY, uint32_t endY);
     void simThreadFunc();
 #endif
 
@@ -138,8 +137,6 @@ void Sim::initWorkers()
 
     workers.reserve(WorkerPoolSize);
 
-    const float deltaTime = 1.0f;
-
     std::cout << "setting up workers...\n";
 
     uint32_t rowsPerWorker = uint32_t(height / WorkerPoolSize);
@@ -154,7 +151,7 @@ void Sim::initWorkers()
 
         workerBusy[i].val = 0;
 
-        auto& worker = workers.emplace_back(&Sim::workerFunc, this, i, startY, endY, deltaTime);
+        auto& worker = workers.emplace_back(&Sim::workerFunc, this, i, startY, endY);
         auto& name = g_staticStrings.emplace_back(std::format(L"Worker {}" , i));
         HANDLE threadHandle = HANDLE(worker.native_handle());
         SetThreadDescription(threadHandle, name.c_str());
@@ -250,7 +247,7 @@ void Sim::simThreadFunc()
     }
 }
 
-void Sim::workerFunc(int ix, uint32_t startY, uint32_t endY, float deltaTime)
+void Sim::workerFunc(int ix, uint32_t startY, uint32_t endY)
 {
     for (;;)
     {
@@ -263,7 +260,7 @@ void Sim::workerFunc(int ix, uint32_t startY, uint32_t endY, float deltaTime)
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        tickSubset(startY, endY, deltaTime);
+        tickSubset(startY, endY);
 
         if (!workerBusy[ix].val.compare_exchange_strong(command, 0))
             break;
@@ -278,7 +275,7 @@ void Sim::workerFunc(int ix, uint32_t startY, uint32_t endY, float deltaTime)
     }
 }
 
-void Sim::tickSubset(uint32_t startY, uint32_t endY, float deltaTime)
+void Sim::tickSubset(uint32_t startY, uint32_t endY)
 {
     auto out = next.data() + (width * startY);
     auto in = cells.data() + (width * startY);
@@ -328,8 +325,8 @@ void Sim::tickSubset(uint32_t startY, uint32_t endY, float deltaTime)
           //  kill = killRate;
 
             float ab2 = in->a * in->b * in->b;
-            out->a = in->a + (diffusionA * laplacian.a - ab2 + feed * (1.0f - in->a));// * deltaTime;
-            out->b = in->b + (diffusionB * laplacian.b + ab2 - (kill + feed) * in->b);// * deltaTime;
+            out->a = in->a + (diffusionA * laplacian.a - ab2 + feed * (1.0f - in->a));
+            out->b = in->b + (diffusionB * laplacian.b + ab2 - (kill + feed) * in->b);
         }
     }
 }
@@ -444,7 +441,7 @@ __declspec(noinline) void Sim::render(uint32_t* pixels, size_t w, size_t h) cons
         float bias = cell->a - cell->b;
         bias -= 0.2f;
         bias *= 10.0f;
-        int i = clamp(int(bias * 255.0f), 0, 0xff);
+        int i = clamp(int(bias * 255.0f), 40, 0xff);
         col = uint32_t((i<<16) | (i<<8) | i);
 
         *pixel = col;
@@ -455,12 +452,12 @@ __declspec(noinline) void Sim::render(uint32_t* pixels, size_t w, size_t h) cons
 
 int main()
 {
-    int width = 900;
-    int height = 900;
+    int width = 800;
+    int height = 500;
 
     Pixie::Window win;
     const bool fullscreen = false;
-    if (!win.Open("Reaction/Diffusion", width, height, fullscreen))
+    if (!win.Open("refusion", width, height, fullscreen))
         return 1;
 
     Sim sim(width, height);
