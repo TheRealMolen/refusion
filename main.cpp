@@ -60,7 +60,7 @@ struct Sim
     vector<Cell> published;
 
     // sim params
-    float diffusionA = 0.6f;
+    float diffusionA = 0.45f;
     float diffusionB = 0.2f;
     float feedRate = 0.055f;//0.055f;
     float killRate = 0.062f;//0.062f;
@@ -239,9 +239,9 @@ void Sim::simThreadFunc()
         }
 
         static constexpr float feedOrg = 0.032f;
-        static constexpr float feedScl = 0.002f;
+        static constexpr float feedScl = 0.008f;
         static constexpr float killOrg = 0.060f;
-        static constexpr float killScl = 0.002f;
+        static constexpr float killScl = 0.008f;
         feedRate = cosf(feedKillAngle) * feedScl + feedOrg;
         killRate = sinf(feedKillAngle) * killScl + killOrg;
     }
@@ -289,6 +289,11 @@ void Sim::tickSubset(uint32_t startY, uint32_t endY)
     const ptrdiff_t dn = width;
     const ptrdiff_t dr = 1 + width;
 
+    static constexpr float minFeedRate = 0.02f;
+    static constexpr float maxFeedRate = 0.09f;
+    static constexpr float minKillRate = 0.0595f;//0.045f;
+    static constexpr float maxKillRate = 0.062f;//0.07f;
+
     float recipWidth = 1.0f / float(width);
     float recipHeight = 1.0f / float(height);
 
@@ -297,8 +302,8 @@ void Sim::tickSubset(uint32_t startY, uint32_t endY)
         size_t py = (y > 0) ? (y - 1) : y;
         size_t ny = (y + 1 < height) ? (y + 1) : y;
 
-        float feed = 0.1f - 0.09f * float(y) * recipHeight;
-       // feed = feedRate;
+        float feed = maxFeedRate - (maxFeedRate - minFeedRate) * float(y) * recipHeight;
+        feed += 0.1f * (feedRate - 0.04f);
 
         for (size_t x = 0; x < width; ++x, ++out, ++in)
         {
@@ -321,8 +326,8 @@ void Sim::tickSubset(uint32_t startY, uint32_t endY)
                 laplacian -= *in;
             }
 
-            float kill = 0.045f + 0.025f * float(x) * recipWidth;
-          //  kill = killRate;
+            float kill = minKillRate + (maxKillRate - minKillRate) * float(x) * recipWidth;
+            kill += 0.1f * (killRate - 0.052f);
 
             float ab2 = in->a * in->b * in->b;
             out->a = in->a + (diffusionA * laplacian.a - ab2 + feed * (1.0f - in->a));
